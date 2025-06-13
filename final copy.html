@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Calories Bubble Chart with TDEE</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0b1d3a;
+            color: white;
+            font-family: sans-serif;
+            overflow: hidden;
+        }
+
+        #form-container {
+            position: absolute;
+            top: 20px;
+            right: 600px;
+            background-color: #112;
+            padding: 10px;
+            border-radius: 8px;
+            z-index: 10;
+        }
+
+        #form-container label {
+            display: block;
+            margin-top: 8px;
+        }
+
+        #form-container input,
+        #form-container select {
+            width: 100%;
+            margin-top: 4px;
+        }
+
+        #form-container-button {
+            margin-top: 8px;
+        }
+
+        #tdee-display {
+            margin-top: 10px;
+            font-weight: bold;
+        }
+
+        select#letterSelect {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            padding: 5px;
+        }
+
+        svg {
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .tooltip {
+            position: absolute;
+            background-color: #fff;
+            color: #000;
+            padding: 6px 10px;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 14px;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.3);
+        }
+
+        .explode {
+            animation: shake 0.3s infinite;
+            fill: red !important;
+        }
+
+        @keyframes shake {
+            0% {
+                transform: translate(0, 0);
+            }
+
+            25% {
+                transform: translate(-2px, 1px);
+            }
+
+            50% {
+                transform: translate(2px, -1px);
+            }
+
+            75% {
+                transform: translate(-1px, 2px);
+            }
+
+            100% {
+                transform: translate(1px, -2px);
+            }
+        }
+
+        #recommend-display div {
+            margin-bottom: 6px;
+            margin-top: 6px;
+            /* 調整這個值來改變間距 */
+        }
+    </style>
+</head>
+
+<body>
+    <div id="form-container">
+        <label for="height">Height (cm):</label>
+        <input type="number" id="height" />
+
+        <label for="weight">Weight (kg):</label>
+        <input type="number" id="weight" />
+
+        <label for="age">Age:</label>
+        <input type="number" id="age" />
+
+        <label for="gender">Gender:</label>
+        <select id="gender">
+            <option value="male">Male</option>
+            <option value="female">Female</option>
+        </select>
+
+        <label for="activity">Activity Level:</label>
+        <select id="activity">
+            <option value="1.2">Sedentary</option>
+            <option value="1.375">Light</option>
+            <option value="1.55">Moderate</option>
+            <option value="1.725">Active</option>
+            <option value="1.9">Very Active</option>
+        </select>
+
+        <button id="form-container-button" onclick="calculateTDEE()">Calculate TDEE</button>
+        <div id="tdee-display">TDEE: ? kcal</div>
+        <div id="recommend-display">
+            <div>Protein: ? g</div>
+            <div>Fat: ? g</div>
+            <div>Carbs: ? g</div>
+        </div>
+
+    </div>
+
+    <select id="letterSelect"></select>
+    <svg id="viz"></svg>
+
+    <script>
+        const svg = d3.select("#viz");
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        svg.attr("width", width).attr("height", height);
+
+        const container = { x: 80, y: 50, width: width * 0.4, height: height - 100 };
+        const plateCenter = { x: width - 300, y: height / 2 };
+        const plateRadius = 150;
+
+        let tdee = Infinity;
+        let currentStats = { kcal: 0, fat: 0, pro: 0, Carb_g: 0 };
+        const inPlateItems = new Map();
+
+        const tooltip = d3.select("body").append("div").attr("class", "tooltip").style("display", "none");
+        const color = d3.scaleOrdinal(d3.schemeCategory10);
+
+        const nutrientScales = {
+            kcal: d3.scaleSqrt().domain([0, 1000]).range([10, 40]).clamp(true),
+            fat: d3.scaleSqrt().domain([0, 100]).range([10, 40]).clamp(true),
+            pro: d3.scaleSqrt().domain([0, 100]).range([10, 40]).clamp(true),
+            Carb_g: d3.scaleSqrt().domain([0, 200]).range([10, 40]).clamp(true)
+        };
+
+
+        const nutrientOffsets = {
+            kcal: { x: 0, y: -200 },
+            fat: { x: 180, y: -90 },
+            pro: { x: 180, y: 90 },
+            Carb_g: { x: 0, y: 200 }
+        };
+
+        const nutrientCircles = {};
+        const nutrientTexts = {};
+
+        svg.append("rect")
+            .attr("x", container.x)
+            .attr("y", container.y)
+            .attr("width", container.width)
+            .attr("height", container.height)
+            .attr("fill", "none")
+            .attr("stroke", "#aaa")
+            .attr("stroke-width", 2)
+            .attr("stroke-dasharray", "6 4");
+
+        svg.append("circle")
+            .attr("cx", plateCenter.x)
+            .attr("cy", plateCenter.y)
+            .attr("r", plateRadius)
+            .attr("fill", "#444")
+            .attr("stroke", "white")
+            .attr("stroke-width", 2);
+
+        Object.keys(nutrientOffsets).forEach(nutrient => {
+            const offset = nutrientOffsets[nutrient];
+
+            nutrientCircles[nutrient] = svg.append("circle")
+                .attr("fill", "#888")
+                .attr("stroke", "white")
+                .attr("stroke-width", 1)
+                .attr("cx", plateCenter.x + offset.x)
+                .attr("cy", plateCenter.y + offset.y)
+                .attr("r", 10);
+
+            nutrientTexts[nutrient] = svg.append("text")
+                .attr("x", plateCenter.x + offset.x)
+                .attr("y", plateCenter.y + offset.y + 4)
+                .attr("text-anchor", "middle")
+                .attr("fill", "white")
+                .attr("font-size", "12px")
+                .text(`0 ${nutrient}`);
+        });
+
+        let recommended = {};
+
+        function calculateTDEE() {
+            const h = +document.getElementById("height").value;
+            const w = +document.getElementById("weight").value;
+            const a = +document.getElementById("age").value;
+            const g = document.getElementById("gender").value;
+            const act = +document.getElementById("activity").value;
+
+            if (!h || !w || !a || !act) return alert("請輸入完整資訊");
+
+            const bmr = g === "male"
+                ? 10 * w + 6.25 * h - 5 * a + 5
+                : 10 * w + 6.25 * h - 5 * a - 161;
+
+            currentTDEE = bmr * act;
+
+            document.getElementById("tdee-display").innerText = `TDEE: ${Math.round(currentTDEE)} kcal`;
+
+            // 建議營養素攝取量計算（以 TDEE 為基準）
+            recommended = {
+                pro: (1.2 * w),                        // 1.6g 蛋白質／kg
+                fat: (0.25 * currentTDEE) / 9,         // 25% 熱量來自脂肪（每克9kcal）
+                Carb_g: (0.5 * currentTDEE) / 4        // 50% 熱量來自碳水（每克4kcal）
+            };
+
+            updateNutrientsDisplay();
+            document.getElementById("recommend-display").innerHTML = `
+            <div>Protein: ${Math.round(recommended.pro)} g</div>
+            <div>Fat: ${Math.round(recommended.fat)} g</div>
+            <div>Carbs: ${Math.round(recommended.Carb_g)} g</div>`;
+        }
+
+
+        function updateNutrientsDisplay() {
+            Object.keys(nutrientCircles).forEach(nutrient => {
+                const circle = nutrientCircles[nutrient];
+                const text = nutrientTexts[nutrient];
+                const offset = nutrientOffsets[nutrient];
+                const value = currentStats[nutrient];
+
+                circle.attr("r", nutrientScales[nutrient](value));
+
+                // 判斷是否達成建議攝取量（非 kcal）
+                if (nutrient !== "kcal" && recommended[nutrient] && value >= recommended[nutrient]) {
+                    circle.attr("fill", "green");
+                } else if (nutrient !== "kcal") {
+                    circle.attr("fill", "#888");
+                }
+
+                text.text(`${Math.round(value)} ${nutrient}`);
+            });
+
+            // kcal 超標則爆炸
+            if (currentStats.kcal > currentTDEE) {
+                nutrientCircles.kcal.classed("explode", true);
+            } else {
+                nutrientCircles.kcal.classed("explode", false);
+            }
+        }
+
+
+        d3.csv("test_labeled.csv").then(data => {
+            data.forEach(d => {
+                d.Calories = +d.Energy_kcal;
+                d.Fat = +d.Fat_g;
+                d.Protein = +d.Protein_g;
+                d.Carb = +d.Carb_g;
+                d.FoodItem = d.Descrip;
+                d.FoodCategory = d.Diet_Group;
+            });
+
+            nutrientScales.kcal.domain([0, d3.max(data, d => d.Calories)]);
+            nutrientScales.fat.domain([0, d3.max(data, d => d.Fat)]);
+            nutrientScales.pro.domain([0, d3.max(data, d => d.Protein)]);
+            nutrientScales.Carb_g.domain([0, d3.max(data, d => d.Carb)]);
+
+            const radiusScale = d3.scaleSqrt()
+                .domain([0, d3.max(data, d => d.Calories)])
+                .range([5, 20]);
+
+            const categories = Array.from(new Set(data.map(d => d.FoodCategory))).sort();
+            const select = d3.select("#letterSelect");
+            select.selectAll("option")
+                .data(categories)
+                .enter().append("option")
+                .text(d => d)
+                .attr("value", d => d);
+
+            select.on("change", () => render(select.node().value));
+            render(categories[0]);
+
+
+            function render(letter) {
+                svg.selectAll(".data-bubble").remove();
+
+                const currentLetterItems = data.filter(d => d.FoodCategory === letter);
+                const plateItems = Array.from(inPlateItems.values());
+                const filtered = [...currentLetterItems, ...plateItems];
+
+                const simulation = d3.forceSimulation(filtered)
+                    .force("x", d3.forceX(container.x + container.width / 2).strength(0.05))
+                    .force("y", d3.forceY(container.y + container.height / 2).strength(0.2))
+                    .force("collide", d3.forceCollide(d => radiusScale(d.Calories) + 1).strength(1))
+                    .alphaDecay(0.02)
+                    .on("tick", ticked);
+
+                const nodes = svg.selectAll(".data-bubble")
+                    .data(filtered, d => d.FoodItem)
+                    .enter()
+                    .append("circle")
+                    .attr("class", "data-bubble")
+                    .attr("r", d => radiusScale(d.Calories))
+                    .attr("fill", d => color(d.FoodCategory))
+                    .call(d3.drag()
+                        .on("start", (event, d) => {
+                            if (!event.active) simulation.alphaTarget(0.3).restart();
+                            d.fx = d.x;
+                            d.fy = d.y;
+                        })
+                        .on("drag", (event, d) => {
+                            d.fx = event.x;
+                            d.fy = event.y;
+                        })
+                        .on("end", (event, d) => {
+                            if (!event.active) simulation.alphaTarget(0);
+                            const dx = event.x - plateCenter.x;
+                            const dy = event.y - plateCenter.y;
+                            const inPlateNow = Math.sqrt(dx * dx + dy * dy) < plateRadius;
+
+                            if (inPlateNow && !d.inPlate) {
+                                d.inPlate = true;
+                                d.fx = event.x;
+                                d.fy = event.y;
+
+                                inPlateItems.set(d.FoodItem, d);
+                                currentStats.kcal += d.Calories;
+                                currentStats.fat += d.Fat;
+                                currentStats.pro += d.Protein;
+                                currentStats.Carb_g += d.Carb;
+                                updateNutrientsDisplay();
+                            } else if (!inPlateNow && d.inPlate) {
+                                d.inPlate = false;
+                                d.fx = null;
+                                d.fy = null;
+
+                                inPlateItems.delete(d.FoodItem);
+                                currentStats.kcal -= d.Calories;
+                                currentStats.fat -= d.Fat;
+                                currentStats.pro -= d.Protein;
+                                currentStats.Carb_g -= d.Carb;
+                                updateNutrientsDisplay();
+                            } else if (!inPlateNow) {
+                                d.fx = null;
+                                d.fy = null;
+                            }
+                        }))
+                    .on("mouseover", (event, d) => {
+                        tooltip.style("display", "block")
+                            .html(`<strong>${d.FoodItem}</strong><br/>${d.Calories} kcal`);
+                    })
+                    .on("mousemove", event => {
+                        tooltip.style("left", (event.pageX + 10) + "px")
+                            .style("top", (event.pageY - 30) + "px");
+                    })
+                    .on("mouseout", () => {
+                        tooltip.style("display", "none");
+                    });
+
+                function ticked() {
+                    nodes
+                        .attr("cx", d => {
+                            if (!d.fx && !d.inPlate) {
+                                d.x = Math.max(container.x + radiusScale(d.Calories),
+                                    Math.min(container.x + container.width - radiusScale(d.Calories), d.x));
+                            }
+                            return d.x;
+                        })
+                        .attr("cy", d => {
+                            if (!d.fy && !d.inPlate) {
+                                d.y = Math.max(container.y + radiusScale(d.Calories),
+                                    Math.min(container.y + container.height - radiusScale(d.Calories), d.y));
+                            }
+                            return d.y;
+                        });
+                }
+            }
+        });
+    </script>
+</body>
+
+</html>
